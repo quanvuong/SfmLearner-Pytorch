@@ -113,7 +113,8 @@ def to_homog(mats):
 
     assert mats.shape[1:] == (3, 4)
 
-    add = torch.tensor([[0, 0, 0, 1] * mats.shape[0]]).float()
+    add = torch.tensor([[0, 0, 0, 1] * mats.shape[0]]).float().to(device)
+    
     add = add.view(
         mats.shape[0], 1, 4
     )
