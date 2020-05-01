@@ -15,6 +15,8 @@ from loss_functions import photometric_reconstruction_loss, explainability_loss,
 from logger import TermLogger, AverageMeter
 from tensorboardX import SummaryWriter
 
+from inverse_warp import pose_vec2mat
+
 parser = argparse.ArgumentParser(description='Structure from Motion Learner training on KITTI and CityScapes Dataset',
                                  formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
@@ -71,7 +73,59 @@ parser.add_argument('-f', '--training-output-freq', type=int,
 
 best_error = -1
 n_iter = 0
-device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+device=torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+
+
+def inv_3by4_trans_mats(mats):
+    '''
+    Take a batch of 3by4 transformation matrix
+    Return their inverse by the formula
+
+    T = [R, p]
+    T_inv = [R_t, - R_t p]
+    '''
+
+    assert mats.shape[1:] == (3, 4)
+
+    R = mats[:, :, :3]
+    p = mats[:,:, 3]
+    
+    R_t = torch.transpose(R, dim0=1, dim1=2)
+
+    # Turn row vector in the batch to column vector
+    p = p.view(mats.shape[0], 3, 1)
+
+    neg_R_tp = - torch.bmm(R_t, p)
+        
+    inv = torch.cat((R_t, neg_R_tp), dim=2)
+
+    assert inv.shape[0] == mats.shape[0]
+    assert inv.shape[1:] == (3, 4), inv.shape
+
+    return inv
+
+def to_homog(mats):
+    '''
+    Take a batch of 3by4 transformation matrix 
+    Turn them into a batch of 4by4 homog transformation matrix
+    by adding 0, 0, 0, 1
+    '''
+
+    assert mats.shape[1:] == (3, 4)
+
+    add = torch.tensor([[0, 0, 0, 1] * mats.shape[0]]).float()
+    add = add.view(
+        mats.shape[0], 1, 4
+    )
+
+    new = torch.cat((
+        mats,
+        add
+    ), dim=1)
+
+    assert new.shape[1:] == (4, 4)
+
+    return new 
 
 
 def main():
@@ -256,6 +310,16 @@ def train(args, train_loader, disp_net, pose_exp_net, optimizer, epoch_size, log
     logger.train_bar.update(0)
 
     for i, (tgt_img, ref_imgs, intrinsics, intrinsics_inv) in enumerate(train_loader):
+
+        # print(tgt_img.shape)
+        # torch.Size([4, 3, 128, 416])
+
+        # print(list([img.shape] for img in ref_imgs))
+        # [[torch.Size([4, 3, 128, 416])], [torch.Size([4, 3, 128, 416])]]
+
+        # print(intrinsics.shape)
+        # torch.Size([4, 3, 3])
+
         log_losses = i > 0 and n_iter % args.print_freq == 0
         log_output = args.training_output_freq > 0 and n_iter % args.training_output_freq == 0
 
@@ -270,16 +334,77 @@ def train(args, train_loader, disp_net, pose_exp_net, optimizer, epoch_size, log
         depth = [1/disp for disp in disparities]
         explainability_mask, pose = pose_exp_net(tgt_img, ref_imgs)
 
+        # print(pose.shape)
+        # torch.Size([4, 2, 6])
+
+        # print(type(explainability_mask), len(explainability_mask))
+        # < class 'list' > 4
+        
         loss_1, warped, diff = photometric_reconstruction_loss(tgt_img, ref_imgs, intrinsics,
                                                                depth, explainability_mask, pose,
                                                                args.rotation_mode, args.padding_mode)
+        
+        assert len(ref_imgs) == 2
+
+        new_tgt_img = ref_imgs[0]
+
+        # Obtain predicted depth for image 1
+        new_disparities = disp_net(new_tgt_img)
+        new_depth = [1 / disp for disp in new_disparities]
+        
+        # Get the predicted pose T_13
+        T21 = pose[:, 0, :]
+        T23 = pose[:, 1,:]
+        
+        T21 = pose_vec2mat(T21)
+        T23 = pose_vec2mat(T23)
+
+        T12 = inv_3by4_trans_mats(T21)
+        T12 = to_homog(T12)
+
+        T23 = to_homog(T23)
+
+        T13 = T12 * T23
+
+        # Turn 4by4 to 3by4 transformation matrix
+        T13 = T13[:,:3,:]
+
+        # To adhere to current code structure
+        # The second dimension in pose indexes over the ref image
+        # We therefore set this dimension to 1
+        T13 = T13.view(
+            T13.shape[0], 1, T13.shape[1], T13.shape[2]
+        )
+
+        # To adhere to the current dimensions of the object in the code
+        # ref_imgs have to be a list of two tensors
+        # But we only want to use image 1 and image 3 in this question
+        # We thus duplicate image 3 
+        new_explain_mask, _ = pose_exp_net(new_tgt_img, [ref_imgs[1], ref_imgs[1]])
+        
+        # remove duplicate mask
+        new_explain_mask = new_explain_mask[:2]
+
+        new_ref_imgs = [ref_imgs[1]]
+
+        photometric_loss_1_tgt_3_src, _, _ = photometric_reconstruction_loss(
+            new_tgt_img, new_ref_imgs, intrinsics,
+            new_depth, new_explain_mask, T13,
+            args.rotation_mode, args.padding_mode,
+
+            # Since we want to avoid converting T13 to 6-vector,
+            # since the code will convert the 6-vector to 3by4 transformation matrix anyway.
+            # We pass a flag to the code downstream to not check and convert the pose
+            should_check_and_convert_pose=False
+        ) 
+
         if w2 > 0:
             loss_2 = explainability_loss(explainability_mask)
         else:
             loss_2 = 0
         loss_3 = smooth_loss(depth)
 
-        loss = w1*loss_1 + w2*loss_2 + w3*loss_3
+        loss = w1*loss_1 + w2*loss_2 + w3*loss_3 + w1*loss_1 + w1*photometric_loss_1_tgt_3_src
 
         if log_losses:
             tb_writer.add_scalar('photometric_error', loss_1.item(), n_iter)

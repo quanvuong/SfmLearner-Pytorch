@@ -7,9 +7,10 @@ from inverse_warp import inverse_warp
 
 def photometric_reconstruction_loss(tgt_img, ref_imgs, intrinsics,
                                     depth, explainability_mask, pose,
-                                    rotation_mode='euler', padding_mode='zeros'):
+                                    rotation_mode='euler', padding_mode='zeros',
+                                    should_check_and_convert_pose=True):
     def one_scale(depth, explainability_mask):
-        assert(explainability_mask is None or depth.size()[2:] == explainability_mask.size()[2:])
+        assert (explainability_mask is None or depth.size()[2:] == explainability_mask.size()[2:])
         assert(pose.size(1) == len(ref_imgs))
 
         reconstruction_loss = 0
@@ -28,7 +29,8 @@ def photometric_reconstruction_loss(tgt_img, ref_imgs, intrinsics,
 
             ref_img_warped, valid_points = inverse_warp(ref_img, depth[:,0], current_pose,
                                                         intrinsics_scaled,
-                                                        rotation_mode, padding_mode)
+                                                        rotation_mode, padding_mode,
+                                                        should_check_and_convert_pose=should_check_and_convert_pose)
             diff = (tgt_img_scaled - ref_img_warped) * valid_points.unsqueeze(1).float()
 
             if explainability_mask is not None:

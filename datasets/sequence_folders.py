@@ -18,7 +18,8 @@ class SequenceFolder(data.Dataset):
         root/scene_2/0000000.jpg
         .
 
-        transform functions must take in a list a images and a numpy array (usually intrinsics matrix)
+        transform functions must take in a list a images and a numpy array 
+        (usually intrinsics matrix)
     """
 
     def __init__(self, root, seed=None, train=True, sequence_length=3, transform=None, target_transform=None):

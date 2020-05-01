@@ -152,7 +152,8 @@ def pose_vec2mat(vec, rotation_mode='euler'):
     return transform_mat
 
 
-def inverse_warp(img, depth, pose, intrinsics, rotation_mode='euler', padding_mode='zeros'):
+def inverse_warp(img, depth, pose, intrinsics, rotation_mode='euler', padding_mode='zeros',
+                 should_check_and_convert_pose=True):
     """
     Inverse warp a source image to the target image plane.
 
@@ -167,14 +168,18 @@ def inverse_warp(img, depth, pose, intrinsics, rotation_mode='euler', padding_mo
     """
     check_sizes(img, 'img', 'B3HW')
     check_sizes(depth, 'depth', 'BHW')
-    check_sizes(pose, 'pose', 'B6')
     check_sizes(intrinsics, 'intrinsics', 'B33')
 
     batch_size, _, img_height, img_width = img.size()
 
     cam_coords = pixel2cam(depth, intrinsics.inverse())  # [B,3,H,W]
 
-    pose_mat = pose_vec2mat(pose, rotation_mode)  # [B,3,4]
+    if should_check_and_convert_pose:
+        check_sizes(pose, 'pose', 'B6')
+        pose_mat = pose_vec2mat(pose, rotation_mode)  # [B,3,4]
+    else:
+        assert pose.shape[1:] == (3, 4)
+        pose_mat = pose
 
     # Get projection matrix for tgt camera frame to source pixel frame
     proj_cam_to_src_pixel = intrinsics @ pose_mat  # [B, 3, 4]
